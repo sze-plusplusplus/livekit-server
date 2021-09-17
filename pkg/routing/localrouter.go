@@ -132,7 +132,7 @@ func (r *LocalRouter) Start() error {
 	return nil
 }
 
-func (r *LocalRouter) PreStop() {
+func (r *LocalRouter) Drain() {
 	r.currentNode.State = livekit.NodeState_SHUTTING_DOWN
 }
 

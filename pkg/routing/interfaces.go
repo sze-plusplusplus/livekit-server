@@ -40,20 +40,31 @@ type RTCMessageCallback func(ctx context.Context, roomName, identity string, msg
 // Router allows multiple nodes to coordinate the participant session
 //counterfeiter:generate . Router
 type Router interface {
+	SignalRouter
+	RTCRouter
+}
+
+type SignalRouter interface {
+	ListNodes() ([]*livekit.Node, error)
 	GetNodeForRoom(ctx context.Context, roomName string) (*livekit.Node, error)
 	SetNodeForRoom(ctx context.Context, roomName string, nodeId string) error
 	ClearRoomState(ctx context.Context, roomName string) error
-	RegisterNode() error
-	UnregisterNode() error
 	RemoveDeadNodes() error
-	GetNode(nodeId string) (*livekit.Node, error)
-	ListNodes() ([]*livekit.Node, error)
 
 	// StartParticipantSignal participant signal connection is ready to start
 	StartParticipantSignal(ctx context.Context, roomName string, pi ParticipantInit) (connectionId string, reqSink MessageSink, resSource MessageSource, err error)
 
 	// WriteRTCMessage sends a message to the RTC node
 	WriteRTCMessage(ctx context.Context, roomName, identity string, msg *livekit.RTCNodeMessage) error
+
+	Start() error
+	Drain()
+	Stop()
+}
+
+type RTCRouter interface {
+	RegisterNode() error
+	UnregisterNode() error
 
 	// OnNewParticipantRTC is called to start a new participant's RTC connection
 	OnNewParticipantRTC(callback NewParticipantCallback)
@@ -62,7 +73,7 @@ type Router interface {
 	OnRTCMessage(callback RTCMessageCallback)
 
 	Start() error
-	PreStop()
+	Drain()
 	Stop()
 }
 
