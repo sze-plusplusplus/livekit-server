@@ -26,7 +26,9 @@ var DefaultStunServers = []string{
 
 type Config struct {
 	Port           uint32             `yaml:"port"`
+	GrpcPort       uint32             `yaml:"grpc_port"`
 	PrometheusPort uint32             `yaml:"prometheus_port"`
+	DisableTwirp   bool               `yaml:"disable_twirp"`
 	RTC            RTCConfig          `yaml:"rtc"`
 	Redis          RedisConfig        `yaml:"redis"`
 	Audio          AudioConfig        `yaml:"audio"`

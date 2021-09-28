@@ -17,6 +17,7 @@ import (
 	"github.com/pion/turn/v2"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/urfave/negroni"
+	"google.golang.org/grpc"
 
 	"github.com/livekit/livekit-server/pkg/config"
 	"github.com/livekit/livekit-server/pkg/routing"
@@ -27,6 +28,7 @@ type LivekitServer struct {
 	config      *config.Config
 	recService  *RecordingService
 	rtcService  *RTCService
+	grpcServer  *grpc.Server
 	httpServer  *http.Server
 	promServer  *http.Server
 	router      routing.Router
@@ -39,7 +41,7 @@ type LivekitServer struct {
 }
 
 func NewLivekitServer(conf *config.Config,
-	roomService livekit.RoomService,
+	roomService *RoomService,
 	recService *RecordingService,
 	rtcService *RTCService,
 	keyProvider auth.KeyProvider,
@@ -68,18 +70,31 @@ func NewLivekitServer(conf *config.Config,
 		middlewares = append(middlewares, NewAPIKeyAuthMiddleware(keyProvider))
 	}
 
-	roomServer := livekit.NewRoomServiceServer(roomService)
-	recServer := livekit.NewRecordingServiceServer(recService)
-
 	mux := http.NewServeMux()
-	mux.Handle(roomServer.PathPrefix(), roomServer)
-	mux.Handle(recServer.PathPrefix(), recServer)
 	mux.Handle("/rtc", rtcService)
 	mux.HandleFunc("/rtc/validate", rtcService.Validate)
 	mux.HandleFunc("/", s.healthCheck)
 	if conf.Development {
 		mux.HandleFunc("/debug/goroutine", s.debugGoroutines)
 		mux.HandleFunc("/debug/rooms", s.debugInfo)
+	}
+
+	if !conf.DisableTwirp {
+		roomServer := livekit.NewRoomServiceServer(roomService)
+		recServer := livekit.NewRecordingServiceServer(recService)
+		mux.Handle(roomServer.PathPrefix(), roomServer)
+		mux.Handle(recServer.PathPrefix(), recServer)
+	}
+
+	if conf.GrpcPort > 0 {
+		grpcAuth := NewGrpcAuth(keyProvider)
+		s.grpcServer = grpc.NewServer(
+			grpc.StreamInterceptor(grpcAuth.StreamServerInterceptor()),
+			grpc.UnaryInterceptor(grpcAuth.UnaryServerInterceptor()),
+		)
+
+		livekit.RegisterRoomServiceServer(s.grpcServer, roomService)
+		livekit.RegisterRecordingServiceServer(s.grpcServer, recService)
 	}
 
 	s.httpServer = &http.Server{
@@ -150,12 +165,28 @@ func (s *LivekitServer) Start() error {
 		}()
 	}
 
+	if s.grpcServer != nil {
+		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", s.config.GrpcPort))
+		if err != nil {
+			return err
+		}
+		go func() {
+			_ = s.grpcServer.Serve(lis)
+		}()
+	}
+
 	go func() {
 		values := []interface{}{
 			"addr", s.httpServer.Addr,
 			"nodeID", s.currentNode.Id,
 			"nodeIP", s.currentNode.Ip,
 			"version", version.Version,
+		}
+		if s.config.DisableTwirp {
+			values = append(values, "disable_twirp", true)
+		}
+		if s.config.GrpcPort > 0 {
+			values = append(values, "grpc_port", s.config.GrpcPort)
 		}
 		if s.config.RTC.TCPPort != 0 {
 			values = append(values, "rtc.portTCP", s.config.RTC.TCPPort)
@@ -193,6 +224,10 @@ func (s *LivekitServer) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	_ = s.httpServer.Shutdown(ctx)
+
+	if s.grpcServer != nil {
+		s.grpcServer.GracefulStop()
+	}
 
 	if s.turnServer != nil {
 		_ = s.turnServer.Close()

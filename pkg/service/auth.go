@@ -6,16 +6,21 @@ import (
 	"net/http"
 	"strings"
 
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	"github.com/grpc-ecosystem/go-grpc-middleware/util/metautils"
 	"github.com/twitchtv/twirp"
+	"google.golang.org/grpc"
 
 	"github.com/livekit/protocol/auth"
 )
 
+type grantKeyType string
+
 const (
-	authorizationHeader = "Authorization"
-	bearerPrefix        = "Bearer "
-	grantsKey           = "grants"
-	accessTokenParam    = "access_token"
+	authorizationHeader              = "Authorization"
+	bearerPrefix                     = "Bearer "
+	grantsKey           grantKeyType = "grants"
+	accessTokenParam                 = "access_token"
 )
 
 var (
@@ -38,44 +43,13 @@ func (m *APIKeyAuthMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	}
 
-	authHeader := r.Header.Get(authorizationHeader)
-	var authToken string
-
-	if authHeader != "" {
-		if !strings.HasPrefix(authHeader, bearerPrefix) {
-			handleError(w, http.StatusUnauthorized, "invalid authorization header. Must start with "+bearerPrefix)
-			return
-		}
-
-		authToken = authHeader[len(bearerPrefix):]
-	} else {
-		// attempt to find from request header
-		authToken = r.FormValue(accessTokenParam)
+	grants, err := checkToken(m.provider, r.Header.Get(authorizationHeader), r.FormValue(accessTokenParam))
+	if err != nil {
+		handleError(w, http.StatusUnauthorized, err.Error())
+		return
 	}
 
-	if authToken != "" {
-		v, err := auth.ParseAPIToken(authToken)
-		if err != nil {
-			handleError(w, http.StatusUnauthorized, "invalid authorization token")
-			return
-		}
-
-		secret := m.provider.GetSecret(v.APIKey())
-		if secret == "" {
-			handleError(w, http.StatusUnauthorized, "invalid API key")
-			return
-		}
-
-		grants, err := v.Verify(secret)
-		if err != nil {
-			handleError(w, http.StatusUnauthorized, "invalid token: "+authToken+", error: "+err.Error())
-			return
-		}
-
-		// set grants in context
-		ctx := r.Context()
-		r = r.WithContext(context.WithValue(ctx, grantsKey, grants))
-	}
+	r = r.WithContext(context.WithValue(r.Context(), grantsKey, grants))
 
 	next.ServeHTTP(w, r)
 }
@@ -155,4 +129,78 @@ func EnsureRecordPermission(ctx context.Context) error {
 // wraps authentication errors around Twirp
 func twirpAuthError(err error) error {
 	return twirp.NewError(twirp.Unauthenticated, err.Error())
+}
+
+type grpcAuth struct {
+	provider auth.KeyProvider
+}
+
+func NewGrpcAuth(p auth.KeyProvider) grpcAuth {
+	return grpcAuth{
+		provider: p,
+	}
+}
+
+func (g *grpcAuth) authGrpc(ctx context.Context) (context.Context, error) {
+
+	grants, err := checkToken(g.provider, metautils.ExtractIncoming(ctx).Get(authorizationHeader), "")
+	if err != nil {
+		return nil, err
+	}
+
+	return context.WithValue(ctx, grantsKey, grants), nil
+}
+
+// UnaryServerInterceptor returns a new unary server interceptors that performs per-request auth.
+func (g *grpcAuth) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		newCtx, err := g.authGrpc(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return handler(newCtx, req)
+	}
+}
+
+// StreamServerInterceptor returns a new unary server interceptors that performs per-request auth.
+func (g *grpcAuth) StreamServerInterceptor() grpc.StreamServerInterceptor {
+	return func(srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		newCtx, err := g.authGrpc(stream.Context())
+		if err != nil {
+			return err
+		}
+
+		wrapped := grpc_middleware.WrapServerStream(stream)
+		wrapped.WrappedContext = newCtx
+		return handler(srv, wrapped)
+	}
+}
+
+func checkToken(provider auth.KeyProvider, header, form string) (*auth.ClaimGrants, error) {
+	if form == "" && (header == "" || !strings.HasPrefix(header, bearerPrefix) || len(bearerPrefix) >= len(header)) {
+		return nil, errors.New("invalid authorization header")
+	}
+
+	authToken := form
+	if header != "" {
+		authToken = header[len(bearerPrefix):]
+	}
+
+	v, err := auth.ParseAPIToken(authToken)
+	if err != nil {
+		return nil, errors.New("invalid authorization token")
+	}
+
+	secret := provider.GetSecret(v.APIKey())
+	if secret == "" {
+		return nil, errors.New("invalid API key")
+	}
+
+	grants, err := v.Verify(secret)
+	if err != nil {
+		return nil, errors.New("invalid token")
+	}
+
+	return grants, nil
 }

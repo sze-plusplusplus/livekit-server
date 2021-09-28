@@ -19,6 +19,7 @@ type RecordingService struct {
 	bus       utils.MessageBus
 	telemetry telemetry.TelemetryService
 	shutdown  chan struct{}
+	livekit.UnimplementedRecordingServiceServer
 }
 
 func NewRecordingService(mb utils.MessageBus, telemetry telemetry.TelemetryService) *RecordingService {
@@ -164,4 +165,8 @@ func (s *RecordingService) resultsWorker() {
 			return
 		}
 	}
+}
+
+func (s *RecordingService) mustEmbedUnimplementedRecordingServiceServer() {
+
 }

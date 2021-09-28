@@ -16,6 +16,7 @@ type RoomService struct {
 	router        routing.MessageRouter
 	roomAllocator RoomAllocator
 	roomStore     RORoomStore
+	livekit.UnimplementedRoomServiceServer
 }
 
 func NewRoomService(ra RoomAllocator, rs RORoomStore, router routing.MessageRouter) (svc livekit.RoomService, err error) {
@@ -247,4 +248,8 @@ func (s *RoomService) writeRoomMessage(ctx context.Context, room, identity strin
 	}
 
 	return s.router.WriteRoomRTC(ctx, room, identity, msg)
+}
+
+func (s *RoomService) mustEmbedUnimplementedRoomServiceServer() {
+
 }
